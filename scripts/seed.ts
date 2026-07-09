@@ -17,9 +17,15 @@ const BUCKET = process.env.CAR_DETAILS_BUCKET ?? "car-details";
 
 const DATABASE_URL = process.env.DATABASE_URL!;
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-if (!DATABASE_URL || !SUPABASE_URL || !SERVICE_KEY) {
-  throw new Error("Missing env — check .env.local (DATABASE_URL, NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)");
+// Secret key (sb_secret_…) is the modern replacement for the service_role key;
+// still fall back to it for older envs. Only needed when uploading spec files.
+const SECRET_KEY = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+const skipUploads = process.env.SKIP_UPLOADS === "1";
+if (!DATABASE_URL || !SUPABASE_URL) {
+  throw new Error("Missing DATABASE_URL / NEXT_PUBLIC_SUPABASE_URL — check your env file");
+}
+if (!skipUploads && !SECRET_KEY) {
+  throw new Error("Uploads need SUPABASE_SECRET_KEY (or set SKIP_UPLOADS=1 for a DB-only seed)");
 }
 
 const REMOTE = !!process.env.ENV_FILE;
@@ -27,9 +33,9 @@ const sql = postgres(DATABASE_URL, {
   max: 8,
   ...(REMOTE ? { prepare: false, ssl: "require" as const } : {}),
 });
-const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
-  auth: { persistSession: false },
-});
+const supabase = SECRET_KEY
+  ? createClient(SUPABASE_URL, SECRET_KEY, { auth: { persistSession: false } })
+  : null;
 
 async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => Promise<void>) {
   let i = 0;
@@ -46,13 +52,11 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => P
 async function main() {
   console.log(`Seeding ${COUNT} cars…`);
 
+  // 1. bucket (public so the app can GET spec files directly)
   // SKIP_UPLOADS=1 skips the bucket entirely — handy for a large DB-only seed
   // when you just want the jsonb-vs-columns bench (which never touches Storage).
-  const skipUploads = process.env.SKIP_UPLOADS === "1";
-
-  // 1. bucket (public so the app can GET spec files directly)
   if (!skipUploads) {
-    const { error: bucketErr } = await supabase.storage.createBucket(BUCKET, {
+    const { error: bucketErr } = await supabase!.storage.createBucket(BUCKET, {
       public: true,
       fileSizeLimit: "1MB",
     });
@@ -70,7 +74,7 @@ async function main() {
   // 3. reset + bulk insert both tables
   await sql`truncate cars_db, cars_storage`;
 
-  const BATCH = 500;
+  const BATCH = Number(process.env.SEED_BATCH ?? 500);
   for (let i = 0; i < cars.length; i += BATCH) {
     const chunk = cars.slice(i, i + BATCH);
     await sql`insert into cars_db ${sql(
@@ -96,7 +100,7 @@ async function main() {
   } else {
     let uploaded = 0;
     await mapLimit(cars, 24, async (c) => {
-      const { error } = await supabase.storage
+      const { error } = await supabase!.storage
         .from(BUCKET)
         .upload(c.path, JSON.stringify(c.details), {
           contentType: "application/json",

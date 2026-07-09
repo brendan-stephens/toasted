@@ -45,18 +45,30 @@ const SCENARIOS: Scenario[] = [
   },
 ];
 
-async function measure(query: string): Promise<{ ms: number; buffers: number }> {
-  // warm up, then take the best of three
-  let best = { ms: Infinity, buffers: 0 };
-  for (let i = 0; i < 3; i++) {
-    const rows = await sql.unsafe(`explain (analyze, buffers, format json) ${query}`);
-    const plan = (rows[0] as any)["QUERY PLAN"][0];
-    const ms = plan["Execution Time"] as number;
-    const top = plan["Plan"];
-    const buffers = (top["Shared Hit Blocks"] ?? 0) + (top["Shared Read Blocks"] ?? 0);
-    if (ms < best.ms) best = { ms, buffers };
+interface Stat { ms: number; hit: number; read: number; io: number }
+
+async function explain(query: string): Promise<Stat> {
+  const rows = await sql.unsafe(`explain (analyze, buffers, format json) ${query}`);
+  const plan = (rows[0] as any)["QUERY PLAN"][0];
+  const top = plan["Plan"];
+  return {
+    ms: plan["Execution Time"] as number,
+    hit: top["Shared Hit Blocks"] ?? 0,
+    read: top["Shared Read Blocks"] ?? 0,
+    io: (top["I/O Read Time"] ?? 0) + (top["I/O Write Time"] ?? 0),
+  };
+}
+
+// The FIRST run shows physical reads (cold-ish); the best of the next runs is
+// steady-state (warm). On EBS the cold `read` count + I/O time is the story.
+async function measure(query: string): Promise<{ cold: Stat; warm: Stat }> {
+  const cold = await explain(query);
+  let warm = cold;
+  for (let i = 0; i < 2; i++) {
+    const r = await explain(query);
+    if (r.ms < warm.ms) warm = r;
   }
-  return best;
+  return { cold, warm };
 }
 
 function pad(s: string, n: number) {
@@ -67,25 +79,36 @@ function padL(s: string, n: number) {
 }
 
 async function main() {
+  // best-effort: measure real I/O wait time if the project allows it
+  let ioTiming = false;
+  try { await sql.unsafe(`set track_io_timing = on`); ioTiming = true; } catch {}
+
   const [{ n }] = await sql<{ n: number }[]>`select count(*)::int n from cars_db`;
-  console.log(`\nTOASTED benchmark — ${n} cars, best of 3 (EXPLAIN ANALYZE)\n`);
+  const [{ sb }] = await sql<{ sb: string }[]>`select current_setting('shared_buffers') sb`;
+  console.log(`\nTOASTED benchmark — ${n} cars · shared_buffers ${sb}${ioTiming ? " · io timing on" : ""}`);
+  console.log(`cold = first run (physical reads shown); warm = best of next 2\n`);
   console.log(
-    pad("Scenario", 36) + padL("DB (jsonb)", 16) + padL("Storage", 16) + padL("Speedup", 10)
+    pad("Scenario", 30) + padL("DB warm", 11) + padL("DB read", 9) +
+    padL("DB io", 9) + padL("Storage", 11) + padL("St.read", 9) + padL("Speedup", 9)
   );
-  console.log("-".repeat(78));
+  console.log("-".repeat(88));
 
   for (const s of SCENARIOS) {
     const d = await measure(s.db);
     const st = await measure(s.storage);
-    const speedup = d.ms / st.ms;
+    const speedup = d.warm.ms / st.warm.ms;
     console.log(
-      pad(s.label, 36) +
-        padL(`${d.ms.toFixed(1)}ms/${d.buffers}b`, 16) +
-        padL(`${st.ms.toFixed(2)}ms/${st.buffers}b`, 16) +
-        padL(`${speedup.toFixed(0)}x`, 10)
+      pad(s.label, 30) +
+        padL(`${d.warm.ms.toFixed(1)}ms`, 11) +
+        padL(`${d.cold.read}`, 9) +
+        padL(ioTiming ? `${d.cold.io.toFixed(0)}ms` : "—", 9) +
+        padL(`${st.warm.ms.toFixed(2)}ms`, 11) +
+        padL(`${st.cold.read}`, 9) +
+        padL(`${speedup.toFixed(0)}x`, 9)
     );
   }
-  console.log("\n(b = 8KB buffers touched; lower is better)\n");
+  console.log(`\nread = 8KB pages read from disk on the cold run · io = time waiting on that I/O`);
+  console.log(`(local NVMe hides this; on EBS the DB 'read'/'io' columns are the real cost)\n`);
   await sql.end();
 }
 

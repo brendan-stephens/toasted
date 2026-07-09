@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start -p 3010",
     "seed": "tsx scripts/seed.ts",
+    "inflate": "tsx scripts/inflate.ts",
     "bench": "tsx scripts/bench.ts"
   },
   "dependencies": {
