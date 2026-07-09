@@ -100,6 +100,39 @@ has a catch:
   scans the candidate files in the app (**hundreds of ms to seconds**). This is
   the whole lesson in one filter.
 
+## Real-world: cloud EBS vs local NVMe
+
+The numbers above were measured locally on NVMe with 2,000 rows — a dataset that
+fits entirely in cache, so the "detoast" cost was really just CPU decompression.
+That **understates** the problem. In production your storage is network-attached
+(EBS), and once the TOAST heap is larger than RAM, every scan re-reads it from
+disk.
+
+To show that, we seeded a real Supabase project (us-west-2, ~1 GB RAM —
+`shared_buffers` 256 MB, `effective_cache_size` 768 MB) and inflated to **500,000
+cars ≈ 1.33 GB of TOAST**, comfortably larger than RAM (`npm run inflate`).
+
+`ENV_FILE=.env.production npm run bench`:
+
+| Filter | DB (jsonb) | Storage | Speedup |
+|---|---|---|---|
+| `price <= 40000` | **10,645 ms** · 1.37 GB read | 29.5 ms | **361×** |
+| `horsepower >= 400` | **10,704 ms** · 1.37 GB read | 51 ms | **209×** |
+| Sort by price, first 24 | **10,682 ms** · 1.37 GB read | 0.08 ms | **136,949×** |
+| Avg price grouped by brand | **15,709 ms** · 1.37 GB read | 216 ms | **73×** |
+| `brand = 'BMW'` (indexed both) | 29 ms · 0 MB read | 13.9 ms | ~2× |
+
+The same `jsonb` filter that took **~10 ms locally takes ~10.7 seconds** here —
+roughly **1000× slower** — because each scan pulls ~1.36 GB of TOAST off EBS, and
+it does so on *every* run (the working set can't be cached). The columnar Storage
+backend answers from small indexed columns in tens of milliseconds regardless.
+And the indexed `brand` lookup stays fast (27 ms) — an index avoids the detoast
+entirely.
+
+> On this managed instance `track_io_timing` couldn't be enabled, so we report
+> bytes read per scan instead of I/O wait time; the constant read volume across
+> warm runs is the evidence that it's disk-bound, not cached.
+
 ## Takeaways
 
 1. **Store the payload in `jsonb`; query it from columns.** Promote the fields

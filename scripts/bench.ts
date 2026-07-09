@@ -78,20 +78,19 @@ function padL(s: string, n: number) {
   return s.length >= n ? s : " ".repeat(n - s.length) + s;
 }
 
-async function main() {
-  // best-effort: measure real I/O wait time if the project allows it
-  let ioTiming = false;
-  try { await sql.unsafe(`set track_io_timing = on`); ioTiming = true; } catch {}
+const mb = (blocks: number) => (blocks * 8) / 1024; // 8KB pages -> MB
 
+async function main() {
   const [{ n }] = await sql<{ n: number }[]>`select count(*)::int n from cars_db`;
-  const [{ sb }] = await sql<{ sb: string }[]>`select current_setting('shared_buffers') sb`;
-  console.log(`\nTOASTED benchmark — ${n} cars · shared_buffers ${sb}${ioTiming ? " · io timing on" : ""}`);
-  console.log(`cold = first run (physical reads shown); warm = best of next 2\n`);
+  const [{ sb, ecs }] = await sql<{ sb: string; ecs: string }[]>`
+    select current_setting('shared_buffers') sb, current_setting('effective_cache_size') ecs`;
+  console.log(`\nTOASTED benchmark — ${n} cars · shared_buffers ${sb} · effective_cache_size ${ecs}`);
+  console.log(`DB read = data pulled off disk per scan (recurs every run once the set exceeds RAM → EBS-bound)\n`);
   console.log(
-    pad("Scenario", 30) + padL("DB warm", 11) + padL("DB read", 9) +
-    padL("DB io", 9) + padL("Storage", 11) + padL("St.read", 9) + padL("Speedup", 9)
+    pad("Scenario", 30) + padL("DB", 11) + padL("DB read", 11) +
+    padL("Storage", 11) + padL("Speedup", 10)
   );
-  console.log("-".repeat(88));
+  console.log("-".repeat(73));
 
   for (const s of SCENARIOS) {
     const d = await measure(s.db);
@@ -99,16 +98,15 @@ async function main() {
     const speedup = d.warm.ms / st.warm.ms;
     console.log(
       pad(s.label, 30) +
-        padL(`${d.warm.ms.toFixed(1)}ms`, 11) +
-        padL(`${d.cold.read}`, 9) +
-        padL(ioTiming ? `${d.cold.io.toFixed(0)}ms` : "—", 9) +
+        padL(`${d.warm.ms.toFixed(0)}ms`, 11) +
+        padL(`${mb(d.warm.read).toFixed(0)}MB`, 11) +
         padL(`${st.warm.ms.toFixed(2)}ms`, 11) +
-        padL(`${st.cold.read}`, 9) +
-        padL(`${speedup.toFixed(0)}x`, 9)
+        padL(`${speedup.toFixed(0)}x`, 10)
     );
   }
-  console.log(`\nread = 8KB pages read from disk on the cold run · io = time waiting on that I/O`);
-  console.log(`(local NVMe hides this; on EBS the DB 'read'/'io' columns are the real cost)\n`);
+  console.log(`\nDB read is measured on the warm run — it's ~constant every pass because when the`);
+  console.log(`TOAST heap exceeds RAM, each filter re-reads it from disk (EBS) instead of cache.`);
+  console.log(`Local NVMe hid this; on EBS the jsonb backend is orders slower than the columns.\n`);
   await sql.end();
 }
 
