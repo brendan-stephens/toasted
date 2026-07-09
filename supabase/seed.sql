@@ -1,0 +1,7 @@
+-- Data for this project is loaded by the app's seed script, not here, because
+-- the "Storage" backend has to upload spec files to a Supabase Storage bucket,
+-- which plain SQL can't do.
+--
+--   npm install
+--   npm run seed            # defaults to 2000 cars
+--   npm run seed -- 5000    # more cars = clearer TOAST numbers, slower seed

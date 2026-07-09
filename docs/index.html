@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TOASTED — when your jsonb lives on disk</title>
+<meta name="description" content="A Supabase sample app benchmarking car specs stored in Postgres jsonb (TOASTed) vs Supabase Storage — and what TOAST really costs." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #121212;
+    --bg-surface: #181818;
+    --bg-raised: #1e1e1e;
+    --bg-control: #232323;
+    --green: #3ecf8e;
+    --green-dark: #24b47e;
+    --green-glow: rgba(62, 207, 142, 0.13);
+    --toast: #e8b96b;      /* toasted amber */
+    --toast-dim: #c99a4e;
+    --toast-glow: rgba(232, 185, 107, 0.14);
+    --fg: #fafafa;
+    --fg-dim: #b4b4b4;
+    --fg-muted: #8a8a8a;
+    --fg-faint: #565656;
+    --border: #262626;
+    --border-strong: #383838;
+    --danger: #e5675d;
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono', Menlo, monospace;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --maxw: 1080px;
+  }
+  html { color-scheme: dark; scroll-behavior: smooth; overflow-x: clip; }
+  body { font-family: var(--font-sans); background: var(--bg); color: var(--fg); line-height: 1.6; font-size: 16px; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  a { color: var(--green); text-decoration: none; }
+  a:hover { color: var(--green-dark); }
+  ::selection { background: rgba(232, 185, 107, 0.25); }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 28px; }
+  .eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--toast); }
+  .display { font-family: var(--font-display); font-weight: 500; letter-spacing: -0.015em; line-height: 1.06; }
+
+  /* nav */
+  nav { position: sticky; top: 0; z-index: 50; background: rgba(18,18,18,0.72); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+  .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 9px; font-family: var(--font-mono); font-weight: 500; font-size: 15px; color: var(--fg); }
+  .brand:hover { color: var(--fg); }
+  .brand .dot { font-size: 17px; }
+  .nav-links { display: flex; align-items: center; gap: 26px; }
+  .nav-links a { color: var(--fg-dim); font-size: 14px; }
+  .nav-links a:hover { color: var(--fg); }
+  .nav-gh { display: inline-flex; align-items: center; gap: 7px; color: var(--fg) !important; padding: 7px 13px; border: 1px solid var(--border-strong); border-radius: 7px; }
+  .nav-gh:hover { border-color: var(--green); }
+  .nav-gh svg { width: 15px; height: 15px; fill: currentColor; }
+  @media (max-width: 720px) { .nav-links a:not(.nav-gh) { display: none; } }
+
+  /* hero */
+  .hero { position: relative; padding: 104px 0 76px; overflow: hidden; }
+  .hero-spot { position: absolute; top: -200px; left: 50%; transform: translateX(-50%); width: 1100px; height: 640px; background: radial-gradient(ellipse at center, var(--toast-glow) 0%, transparent 65%); pointer-events: none; z-index: 0; }
+  .hero .wrap { position: relative; z-index: 1; }
+  .hero h1 { font-size: clamp(44px, 8vw, 88px); margin: 20px 0 0; }
+  .hero h1 .amber { color: var(--toast); }
+  .hero .sub { font-size: clamp(17px, 2.4vw, 21px); color: var(--fg-dim); max-width: 640px; margin: 24px 0 0; }
+  .hero .cta { display: flex; gap: 14px; margin-top: 36px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; padding: 12px 20px; border-radius: 8px; border: 1px solid transparent; transition: all .15s var(--ease); }
+  .btn-primary { background: var(--green); color: #06251a !important; }
+  .btn-primary:hover { background: var(--green-dark); color: #06251a !important; }
+  .btn-ghost { border-color: var(--border-strong); color: var(--fg) !important; }
+  .btn-ghost:hover { border-color: var(--toast); }
+
+  /* generic section */
+  section { padding: 72px 0; border-top: 1px solid var(--border); }
+  .sec-head { max-width: 680px; margin-bottom: 44px; }
+  .sec-head h2 { font-size: clamp(28px, 4.5vw, 42px); margin: 12px 0 0; }
+  .sec-head p { color: var(--fg-dim); margin-top: 16px; font-size: 17px; }
+  .lead { color: var(--toast); }
+
+  /* two-backend cards */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
+  .card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 14px; padding: 26px; }
+  .card h3 { font-family: var(--font-display); font-weight: 500; font-size: 23px; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .tag { font-family: var(--font-mono); font-size: 11px; padding: 3px 9px; border-radius: 999px; font-weight: 500; }
+  .tag.db { background: rgba(124,156,255,.16); color: #9db4ff; }
+  .tag.st { background: var(--toast-glow); color: var(--toast); }
+  .card .desc { color: var(--fg-dim); font-size: 15px; margin-bottom: 18px; }
+  .card ul { list-style: none; display: flex; flex-direction: column; gap: 9px; }
+  .card li { display: flex; gap: 10px; font-size: 14px; color: var(--fg-dim); }
+  .card li b { color: var(--fg); font-weight: 600; }
+  .card li .mk { color: var(--toast); flex-shrink: 0; }
+  .card li .mk.g { color: var(--green); }
+
+  /* diagram */
+  .diagram { margin-top: 40px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 14px; padding: 30px; }
+  .diagram .row { display: grid; grid-template-columns: 120px 1fr; gap: 18px; align-items: center; }
+  .diagram .row + .row { margin-top: 18px; padding-top: 18px; border-top: 1px dashed var(--border); }
+  .diagram .rlabel { font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted); }
+  .diagram .rlabel b { display: block; color: var(--fg); font-size: 13px; margin-bottom: 3px; }
+  .chips { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .chip { font-family: var(--font-mono); font-size: 12px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-control); }
+  .chip.small { color: var(--green); border-color: rgba(62,207,142,.3); }
+  .chip.blob { color: var(--toast); border-color: rgba(232,185,107,.3); }
+  .chip.disk { background: repeating-linear-gradient(45deg, var(--bg-control), var(--bg-control) 6px, #1a1a1a 6px, #1a1a1a 12px); color: var(--toast); border-color: rgba(232,185,107,.3); }
+  .arrow { color: var(--fg-faint); }
+
+  /* stats */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  @media (max-width: 760px) { .stats { grid-template-columns: 1fr 1fr; } }
+  .stat { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 14px; padding: 22px; }
+  .stat .n { font-family: var(--font-display); font-size: 40px; font-weight: 600; color: var(--toast); line-height: 1; }
+  .stat .l { font-size: 13px; color: var(--fg-dim); margin-top: 10px; }
+
+  /* results table */
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 14.5px; }
+  thead th { text-align: left; font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-muted); padding: 0 14px 12px; font-weight: 500; }
+  thead th.num, tbody td.num { text-align: right; }
+  tbody td { padding: 14px; border-top: 1px solid var(--border); }
+  tbody tr:hover { background: var(--bg-surface); }
+  td .mono { font-family: var(--font-mono); }
+  td .db { color: #9db4ff; }
+  td .st { color: var(--toast); }
+  td .up { font-family: var(--font-mono); font-weight: 500; color: var(--green); }
+  .note { color: var(--fg-muted); font-size: 13px; margin-top: 18px; }
+
+  /* callout */
+  .callout { background: linear-gradient(180deg, var(--bg-surface), var(--bg)); border: 1px solid var(--border-strong); border-left: 3px solid var(--toast); border-radius: 12px; padding: 24px 26px; margin-top: 28px; }
+  .callout h4 { font-family: var(--font-display); font-weight: 500; font-size: 20px; margin-bottom: 8px; }
+  .callout p { color: var(--fg-dim); font-size: 15px; }
+
+  /* code */
+  pre { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; padding: 22px; overflow-x: auto; font-family: var(--font-mono); font-size: 13.5px; line-height: 1.7; color: var(--fg-dim); }
+  pre .c { color: var(--fg-faint); }
+  pre .k { color: var(--toast); }
+  code.inline { font-family: var(--font-mono); font-size: 0.9em; background: var(--bg-control); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; color: var(--green); }
+
+  /* takeaways */
+  .takes { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .takes { grid-template-columns: 1fr; } }
+  .take { display: flex; gap: 16px; padding: 20px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; }
+  .take .num { font-family: var(--font-display); font-size: 24px; color: var(--toast); font-weight: 600; line-height: 1.2; }
+  .take p { font-size: 14.5px; color: var(--fg-dim); }
+  .take p b { color: var(--fg); }
+
+  footer { border-top: 1px solid var(--border); padding: 40px 0 60px; color: var(--fg-muted); font-size: 13px; }
+  footer .wrap { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-inner">
+    <a href="#top" class="brand"><span class="dot">🍞</span> TOASTED</a>
+    <div class="nav-links">
+      <a href="#toast">What TOAST is</a>
+      <a href="#setup">The setup</a>
+      <a href="#results">Results</a>
+      <a href="#run">Run it</a>
+      <a class="nav-gh" href="https://github.com/brendan-stephens/toasted" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span class="gh-label">GitHub</span>
+      </a>
+    </div>
+  </div>
+</nav>
+
+<div id="top" class="hero">
+  <div class="hero-spot"></div>
+  <div class="wrap">
+    <div class="eyebrow">Postgres jsonb · TOAST · Supabase Storage</div>
+    <h1 class="display">When your <span class="amber">jsonb</span><br />lives on disk.</h1>
+    <p class="sub">A sample Supabase app that stores 2,000 cars two ways — full spec sheet in a Postgres <code class="inline">jsonb</code> column, or filter-columns in the database with the blob in Storage — and benchmarks the same filter against both. Same data. Wildly different cost.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#results">See the numbers ↓</a>
+      <a class="btn btn-ghost" href="https://github.com/brendan-stephens/toasted" target="_blank" rel="noopener">Read the code</a>
+    </div>
+  </div>
+</div>
+
+<section id="toast">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">The oversized-attribute storage technique</div>
+      <h2 class="display">A row must fit in 8&nbsp;KB. Big values move out.</h2>
+      <p>When a row grows past ~2&nbsp;KB, Postgres compresses large values and, if it still doesn't fit, moves them <span class="lead">out-of-line</span> into a hidden per-table <b>TOAST table</b>, leaving an 18-byte pointer inline. A rich car spec sheet crosses that line — so every document gets TOASTed.</p>
+    </div>
+    <div class="callout">
+      <h4>TOAST is all-or-nothing per value.</h4>
+      <p>To read one key out of a TOASTed <code class="inline">jsonb</code> document, Postgres fetches every chunk of that value from the TOAST table and decompresses the <b>whole thing</b> — even for one 8-character string. And because it lives out-of-line, that fetch is a <b>read from disk</b>: an I/O cost you pay on every row a query inspects. Filtering or sorting on a spec detoasts the documents it touches.</p>
+    </div>
+  </div>
+</section>
+
+<section id="setup">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Two backends, one dataset</div>
+      <h2 class="display">Store the same cars two ways.</h2>
+      <p>Flip a toggle in the app and run the identical filter against either backend.</p>
+    </div>
+    <div class="cols">
+      <div class="card">
+        <h3>Database <span class="tag db">jsonb</span></h3>
+        <div class="desc">The entire spec sheet in one <code class="inline">jsonb</code> column.</div>
+        <ul>
+          <li><span class="mk">›</span><span>Filters read keys out of the jsonb — <b>detoast per row</b></span></li>
+          <li><span class="mk">›</span><span>GIN + expression indexes on <b>brand / body_type</b></span></li>
+          <li><span class="mk g">✓</span><span>Any field is queryable in SQL, even deep arrays</span></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Storage <span class="tag st">hybrid</span></h3>
+        <div class="desc">Filter fields as columns; the blob is a file in a bucket.</div>
+        <ul>
+          <li><span class="mk g">✓</span><span>Filters hit <b>small indexed columns</b> — nothing to detoast</span></li>
+          <li><span class="mk">›</span><span>Full spec fetched from the bucket only on the detail page</span></li>
+          <li><span class="mk" style="color:var(--danger)">✗</span><span>Fields left in the blob <b>can't be queried in SQL</b></span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <div class="row">
+        <div class="rlabel"><b>Database</b> cars_db</div>
+        <div class="chips">
+          <span class="chip small">id · name</span>
+          <span class="chip small">→ TOAST pointer</span>
+          <span class="arrow">╌╌►</span>
+          <span class="chip disk">full spec jsonb · out-of-line on disk</span>
+        </div>
+      </div>
+      <div class="row">
+        <div class="rlabel"><b>Storage</b> cars_storage</div>
+        <div class="chips">
+          <span class="chip small">id · name · brand · price · hp · body · fuel …</span>
+          <span class="arrow">╌╌►</span>
+          <span class="chip blob">details.json · in the bucket</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="results">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Measured locally · 2,000 cars · best of 3 · EXPLAIN ANALYZE</div>
+      <h2 class="display">Same query. Up to 687× apart.</h2>
+      <p>The Database backend reads ~6,100 buffers on almost every query — detoasting all 2,000 documents to inspect one field. Storage answers from tiny indexed columns and touches a handful of pages. On cloud EBS (vs local NVMe) the gap only widens once the working set leaves cache.</p>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="n">100%</div><div class="l">of cars_db rows TOASTed (~2.5&nbsp;KB avg doc)</div></div>
+      <div class="stat"><div class="n">146×</div><div class="l">more storage in the TOAST table than the main heap</div></div>
+      <div class="stat"><div class="n">687×</div><div class="l">faster to sort by price on the Storage backend</div></div>
+      <div class="stat"><div class="n">~6.1k</div><div class="l">buffers detoasted per Database filter</div></div>
+    </div>
+
+    <table style="margin-top:34px">
+      <thead>
+        <tr><th>Filter</th><th class="num">Database (jsonb)</th><th class="num">Storage</th><th class="num">Speedup</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>price ≤ 40000</td><td class="num mono db">10.8 ms</td><td class="num mono st">0.03 ms</td><td class="num up">349×</td></tr>
+        <tr><td>horsepower ≥ 400</td><td class="num mono db">9.2 ms</td><td class="num mono st">0.05 ms</td><td class="num up">184×</td></tr>
+        <tr><td>sort by price, first 24</td><td class="num mono db">7.6 ms</td><td class="num mono st">0.01 ms</td><td class="num up">687×</td></tr>
+        <tr><td>avg price grouped by brand</td><td class="num mono db">13.6 ms</td><td class="num mono st">0.21 ms</td><td class="num up">65×</td></tr>
+        <tr><td>brand = 'BMW' <span style="color:var(--fg-faint)">(indexed both)</span></td><td class="num mono db">0.03 ms</td><td class="num mono st">0.01 ms</td><td class="num up">~2×</td></tr>
+      </tbody>
+    </table>
+    <p class="note">The <code class="inline">brand = 'BMW'</code> row is a dead heat because <code class="inline">cars_db</code> has an expression index on <code class="inline">(details-&gt;&gt;'brand')</code> — indexed access doesn't detoast. Index the path you actually query and jsonb competes; leave it to a scan and you pay the I/O.</p>
+  </div>
+</section>
+
+<section id="trap">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">The whole lesson in one filter</div>
+      <h2 class="display">Filter a "deep" spec.</h2>
+      <p>The <code class="inline">features</code> array — “360 Camera”, “Heated Seats” — is the tell. In the app it's a multi-select; picks are AND-ed.</p>
+    </div>
+    <div class="cols">
+      <div class="card">
+        <h3>Database <span class="tag db">jsonb</span></h3>
+        <div class="desc">One indexed SQL query via the GIN index (<code class="inline">jsonb_path_ops</code>).</div>
+        <pre><span class="c">-- containment, index-assisted</span>
+<span class="k">select</span> * <span class="k">from</span> cars_db
+<span class="k">where</span> details @&gt; '{"features":["360 Camera"]}';
+<span class="c">-- ~70 ms, no whole-doc download</span></pre>
+      </div>
+      <div class="card">
+        <h3>Storage <span class="tag st">hybrid</span></h3>
+        <div class="desc"><code class="inline">features</code> is inside the blob — not a column. There's no SQL for it.</div>
+        <pre><span class="c">-- narrow by columns, then...</span>
+download 192 JSON files from Storage
+scan them in the app
+<span class="c">-- hundreds of ms → seconds</span></pre>
+      </div>
+    </div>
+    <div class="callout">
+      <h4>You can't <code class="inline">WHERE</code> your way into an object-storage file.</h4>
+      <p>Anything you leave in the blob is invisible to SQL. Caching the files only speeds up fetch-by-key; a foreign data wrapper just moves the scan into Postgres without saving the transfer. The fast answer is to keep queryable fields in the database.</p>
+    </div>
+  </div>
+</section>
+
+<section id="nuance">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Not one-directional</div>
+      <h2 class="display">Storage isn't the loser — it's the wrong tool for querying.</h2>
+    </div>
+    <div class="cols">
+      <div class="card">
+        <h3 class="display" style="font-size:20px">Fetch one full spec by id</h3>
+        <div class="desc" style="margin:0">Detail page, whole document.</div>
+        <div style="display:flex; gap:24px; margin-top:18px">
+          <div><div class="mono db" style="font-size:24px">~1.3 ms</div><div style="color:var(--fg-muted);font-size:13px">jsonb detoast, one row</div></div>
+          <div><div class="mono st" style="font-size:24px">~11 ms</div><div style="color:var(--fg-muted);font-size:13px">Storage HTTP GET</div></div>
+        </div>
+        <p style="color:var(--fg-dim);font-size:14px;margin-top:16px">For fetch-by-key, a single-row detoast beats a network round-trip.</p>
+      </div>
+      <div class="card">
+        <h3 class="display" style="font-size:20px">Use each for what it's good at</h3>
+        <ul style="margin-top:14px">
+          <li><span class="mk g">✓</span><span><b>jsonb</b> — the payload, plus any field you filter or sort on</span></li>
+          <li><span class="mk g">✓</span><span><b>Storage</b> — large blobs you retrieve by key; cheap bytes, CDN-friendly</span></li>
+          <li><span class="mk">›</span><span>Promote hot fields to columns or <b>STORED generated columns</b></span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="run">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Local in a minute</div>
+      <h2 class="display">Run it yourself.</h2>
+      <p>A Next.js app over a local Supabase stack. Seed fills both tables and uploads the spec files.</p>
+    </div>
+    <pre><span class="k">supabase</span> start                 <span class="c"># local stack</span>
+<span class="k">supabase</span> db reset              <span class="c"># apply the cars schema</span>
+<span class="k">npm</span> install
+<span class="k">npm</span> run seed                   <span class="c"># 2000 cars: both tables + bucket files</span>
+
+<span class="k">npm</span> run dev                    <span class="c"># http://localhost:3010</span>
+<span class="k">npm</span> run bench                  <span class="c"># raw EXPLAIN ANALYZE comparison</span></pre>
+
+    <div class="takes" style="margin-top:34px">
+      <div class="take"><div class="num">1</div><p><b>Store the payload in jsonb; query it from columns.</b> Promote fields you filter/sort/aggregate on to real or generated columns.</p></div>
+      <div class="take"><div class="num">2</div><p><b>Reading a key from a big jsonb isn't free</b> — it detoasts and decompresses the whole document off disk. Fine occasionally, deadly in a hot filter.</p></div>
+      <div class="take"><div class="num">3</div><p><b>Storage is for blobs you fetch by key</b> — cheap, CDN-friendly. But nothing left in the blob is reachable from SQL.</p></div>
+      <div class="take"><div class="num">4</div><p><b>If you must query jsonb, index the path</b> — an expression index for scalars, a GIN index for containment.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>🍞 TOASTED — a Supabase jsonb-vs-Storage benchmark.</div>
+    <div><a href="https://github.com/brendan-stephens/toasted" target="_blank" rel="noopener">github.com/brendan-stephens/toasted</a></div>
+  </div>
+</footer>
+
+</body>
+</html>
