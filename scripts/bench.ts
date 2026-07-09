@@ -1,10 +1,15 @@
 // Raw SQL benchmark: run representative queries against both backends and print
 // execution time + buffers side by side.  `npm run bench`
 import dotenv from "dotenv";
-dotenv.config({ path: ".env.local" });
+// ENV_FILE=.env.production npm run bench  -> bench a remote project
+dotenv.config({ path: process.env.ENV_FILE ?? ".env.local" });
 import postgres from "postgres";
 
-const sql = postgres(process.env.DATABASE_URL!, { max: 2 });
+const REMOTE = !!process.env.ENV_FILE;
+const sql = postgres(process.env.DATABASE_URL!, {
+  max: 2,
+  ...(REMOTE ? { prepare: false, ssl: "require" as const } : {}),
+});
 
 interface Scenario {
   label: string;

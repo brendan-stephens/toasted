@@ -5,7 +5,8 @@
 //   npm run seed            # 2000 cars
 //   npm run seed -- 5000    # more cars
 import dotenv from "dotenv";
-dotenv.config({ path: ".env.local" });
+// ENV_FILE=.env.production npm run seed  -> seed a remote project
+dotenv.config({ path: process.env.ENV_FILE ?? ".env.local" });
 
 import postgres from "postgres";
 import { createClient } from "@supabase/supabase-js";
@@ -21,7 +22,11 @@ if (!DATABASE_URL || !SUPABASE_URL || !SERVICE_KEY) {
   throw new Error("Missing env — check .env.local (DATABASE_URL, NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)");
 }
 
-const sql = postgres(DATABASE_URL, { max: 8 });
+const REMOTE = !!process.env.ENV_FILE;
+const sql = postgres(DATABASE_URL, {
+  max: 8,
+  ...(REMOTE ? { prepare: false, ssl: "require" as const } : {}),
+});
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
   auth: { persistSession: false },
 });
@@ -41,13 +46,19 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => P
 async function main() {
   console.log(`Seeding ${COUNT} cars…`);
 
+  // SKIP_UPLOADS=1 skips the bucket entirely — handy for a large DB-only seed
+  // when you just want the jsonb-vs-columns bench (which never touches Storage).
+  const skipUploads = process.env.SKIP_UPLOADS === "1";
+
   // 1. bucket (public so the app can GET spec files directly)
-  const { error: bucketErr } = await supabase.storage.createBucket(BUCKET, {
-    public: true,
-    fileSizeLimit: "1MB",
-  });
-  if (bucketErr && !/already exists/i.test(bucketErr.message)) throw bucketErr;
-  console.log(`Bucket "${BUCKET}" ready.`);
+  if (!skipUploads) {
+    const { error: bucketErr } = await supabase.storage.createBucket(BUCKET, {
+      public: true,
+      fileSizeLimit: "1MB",
+    });
+    if (bucketErr && !/already exists/i.test(bucketErr.message)) throw bucketErr;
+    console.log(`Bucket "${BUCKET}" ready.`);
+  }
 
   // 2. build every car up front (deterministic from id)
   const cars = Array.from({ length: COUNT }, (_, i) => {
@@ -80,20 +91,24 @@ async function main() {
   console.log("");
 
   // 4. upload each car's full spec JSON to the bucket
-  let uploaded = 0;
-  await mapLimit(cars, 24, async (c) => {
-    const { error } = await supabase.storage
-      .from(BUCKET)
-      .upload(c.path, JSON.stringify(c.details), {
-        contentType: "application/json",
-        upsert: true,
-      });
-    if (error) throw error;
-    if (++uploaded % 100 === 0 || uploaded === cars.length) {
-      process.stdout.write(`\r  uploaded ${uploaded}/${cars.length} spec files`);
-    }
-  });
-  console.log("");
+  if (skipUploads) {
+    console.log("  SKIP_UPLOADS=1 — skipping bucket uploads (DB-only seed).");
+  } else {
+    let uploaded = 0;
+    await mapLimit(cars, 24, async (c) => {
+      const { error } = await supabase.storage
+        .from(BUCKET)
+        .upload(c.path, JSON.stringify(c.details), {
+          contentType: "application/json",
+          upsert: true,
+        });
+      if (error) throw error;
+      if (++uploaded % 100 === 0 || uploaded === cars.length) {
+        process.stdout.write(`\r  uploaded ${uploaded}/${cars.length} spec files`);
+      }
+    });
+    console.log("");
+  }
 
   // 5. refresh planner stats
   await sql`analyze cars_db`;
